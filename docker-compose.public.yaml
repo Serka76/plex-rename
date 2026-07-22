@@ -1,0 +1,43 @@
+# Plex Rename — docker-compose.yaml
+# Автор интерфейса: Sergey Sychev
+#
+# ПЕРЕД ЗАПУСКОМ ПОПРАВЬТЕ:
+#   1. Путь к вашей папке с фильмами в разделе volumes ниже
+#      (слева — путь на вашём сервере/NAS, справа — тот же путь,
+#      каким его должен видеть Plex; проще всего сделать их одинаковыми).
+#   2. При желании — порт 5055, если он у вас уже занят другим сервисом.
+#
+# ЗАПУСК:
+#   docker compose up -d
+#   Открыть в браузере: http://<адрес-вашего-сервера>:5055
+#
+# ПРИМЕЧАНИЕ ПРО network_mode: host
+#   Используется, чтобы контейнер мог напрямую достучаться до Plex
+#   по локальному IP вашей сети (частая проблема на Synology/QNAP —
+#   обычный docker-мост не может обратиться к собственному LAN-адресу
+#   хоста). Работает на Linux-хостах (Synology, QNAP, обычный Linux-сервер).
+#   Если ваш Docker не поддерживает host-режим (например, Docker Desktop
+#   на Windows/Mac) — уберите строку "network_mode: host" и вместо неё
+#   раскомментируйте блок "ports" ниже, а в адресе Plex внутри самого
+#   приложения укажите IP хоста, а не localhost.
+
+version: "3.8"
+
+services:
+  plex-rename-app:
+    image: python:3.11-slim
+    container_name: plex-rename-app
+    working_dir: /app
+
+    network_mode: host
+    # ports:
+    #   - "5055:5055"
+
+    volumes:
+      - ./app.py:/app/app.py
+      - ./logs:/app/logs
+      # ЗАМЕНИТЕ на путь к вашей библиотеке фильмов:
+      - /path/to/your/movies:/path/to/your/movies
+
+    command: sh -c "pip install flask plexapi --break-system-packages -q && python3 app.py"
+    restart: unless-stopped
