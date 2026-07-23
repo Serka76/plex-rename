@@ -1,0 +1,19 @@
+# Логи и рабочие данные
+logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Локальные настройки (если появятся файлы с токеном/конфигом)
+.env
+config.local.*
