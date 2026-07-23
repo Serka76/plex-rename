@@ -1,0 +1,11 @@
+name: Bug Report
+description: Сообщить о проблеме в работе Plex Rename
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - {type: markdown, attributes: {value: "Спасибо, что нашли время сообщить о проблеме!"}}
+  - {type: input, id: version, attributes: {label: "Версия Plex Rename", description: "Смотрите в верхнем правом углу интерфейса или в логах", placeholder: "1.7.2"}, validations: {required: true}}
+  - {type: textarea, id: what-happened, attributes: {label: "Что произошло", description: "Опишите проблему как можно подробнее", placeholder: "Например: файлы не переименовываются, хотя в превью всё выглядит корректно"}, validations: {required: true}}
+  - {type: textarea, id: template, attributes: {label: "Шаблон именования", description: "Какой шаблон имён вы используете, если отличается от стандартного"}, validations: {required: false}}
+  - {type: textarea, id: logs, attributes: {label: "Логи", description: "Содержимое папки logs или вывод docker compose logs -f, вставьте фрагмент. Без токена Plex!", render: shell}, validations: {required: false}}
+  - {type: checkboxes, id: checklist, attributes: {label: "Чек-лист", options: [{label: "Фильм точно сопоставлен с правильными метаданными в самом Plex", required: false}]}}
