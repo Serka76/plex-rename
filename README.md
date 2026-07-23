@@ -54,7 +54,7 @@
 1. На вкладке «Настройка» впишите адрес Plex (`http://IP:32400`), токен и точное имя библиотеки. Токен смотрите в самом Plex: любой фильм → ⋯ → «Получить информацию» → «View XML» → в адресной строке `X-Plex-Token=...`.
 2. Нажмите «Показать превью». На больших библиотеках появится индикатор загрузки — дождитесь его.
 ![License](https://img.shields.io/badge/license-custom-lightgrey.svg) ![Docker](https://img.shields.io/badge/docker-ready-blue.svg) ![Version](https://img.shields.io/badge/version-1.7.2-orange.svg) ![Plex](https://img.shields.io/badge/Plex-Rename%20Tool-e5a00d.svg)
-
+ ![Lint](https://github.com/Serka76/plex-rename/actions/workflows/lint.yml/badge.svg)
 3. Проверьте вкладки «Конфликты» и «Без TMDB». Если фильм не находится, а должен — используйте диагностику на вкладке «Без TMDB»: впишите название, посмотрите сырые данные Plex по нему.
 4. Список на вкладке «Превью» устраивает — нажимайте «Применить переименование».
 5. Прогресс виден на вкладке «Журнал». Тот же журнал сохраняется файлом в `logs/`.
