@@ -24,7 +24,7 @@ except ImportError:
 
 app = Flask(__name__)
 
-VERSION = "1.7.2"
+VERSION = "1.8.0"
 STARTED_AT = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 LAST_PLAN = []
@@ -236,7 +236,7 @@ PAGE = """
 
       <label>Шаблон нового имени файла</label>
       <input type="text" name="template" value="{{ template }}">
-      <p class="hint">Доступно: {title_full} (название + оригинальное, если оно рус/лат) · {year} · {resolution} · {video_codec} · {audio_codec} · {audio_channels} · {edition} · {ext_ref} (tmdb-ID или, если его нет — imdb-ID)</p>
+      <p class="hint">Доступно: {title_full} (название + оригинальное, если оно рус/лат) · {year} · {resolution} · {video_codec} · {audio_codec} · {audio_channels} · {edition} · {ext_ref} (tmdb-ID или, если его нет — imdb-ID). Многочастевые фильмы (несколько файлов у одного фильма в Plex — например старые советские картины в 2 сериях) получают суффикс « - pt1», « - pt2» и т.д. в конце имени автоматически, по стандартному соглашению Plex — в шаблоне указывать не нужно.</p>
 
       <button type="submit" class="btn-primary">Показать превью →</button>
     </form>
@@ -461,7 +461,16 @@ def get_audio_channels_label(media):
     return mapping.get(ch, f"{ch}ch")
 
 
-def build_new_name(movie, template: str, ext_ref: str) -> str:
+def build_new_name(movie, template: str, ext_ref: str, part_num: int = None, part_total: int = None) -> str:
+    """
+    part_num/part_total описывают многочастевой фильм — когда у одного
+    фильма в Plex несколько файлов-частей (типично для старых советских
+    картин, выходивших по 2 (иногда больше) сериям). Если part_total > 1,
+    к итоговому имени добавляется суффикс " - ptN" в самом конце, перед
+    расширением — это официальный формат Plex для многочастевых файлов
+    (см. https://support.plex.tv, "Multi-part movies"), он же позволяет
+    Plex и дальше держать части одного фильма вместе после переименования.
+    """
     title = movie.title or "Unknown"
     original_title = getattr(movie, "originalTitle", None) or title
     year = movie.year or "0000"
@@ -504,6 +513,10 @@ def build_new_name(movie, template: str, ext_ref: str) -> str:
             f"Доступны: title_full, year, resolution, video_codec, audio_codec, "
             f"audio_channels, edition, ext_ref."
         )
+
+    if part_total and part_total > 1 and part_num:
+        new_name = f"{new_name} - pt{part_num}"
+
     return safe_filename(new_name)
 
 
@@ -527,13 +540,15 @@ def compute_plan(plex_url, plex_token, library_name, template):
                     unmatched.append({"file": os.path.basename(part.file), "title": f"{movie.title} ({movie.year})"})
             continue
 
-        for part in movie.media[0].parts:
+        parts = movie.media[0].parts
+        part_total = len(parts)
+        for part_num, part in enumerate(parts, start=1):
             old_path = part.file
             if not old_path or not os.path.exists(old_path):
                 continue
             folder = os.path.dirname(old_path)
             ext = os.path.splitext(old_path)[1]
-            new_base = build_new_name(movie, template, ext_ref)
+            new_base = build_new_name(movie, template, ext_ref, part_num=part_num, part_total=part_total)
             new_path = os.path.join(folder, new_base + ext)
             if old_path == new_path:
                 already_ok += 1
