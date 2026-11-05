@@ -24,7 +24,7 @@ except ImportError:
 
 app = Flask(__name__)
 
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 STARTED_AT = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 # v1.9.0. Раньше план лежал в одной переменной на весь процесс. Открыв
