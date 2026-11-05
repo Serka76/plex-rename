@@ -13,8 +13,10 @@ import app as plex_rename  # noqa: E402
 
 
 @pytest.fixture
-def app_module():
-    """Приложение с чистым состоянием: планы и задачи между тестами не текут."""
+def app_module(tmp_path):
+    """Приложение с чистым состоянием: планы и задачи между тестами не
+    текут, а журнал пишется во временную папку вместо /app/logs."""
+    plex_rename.LOG_DIR = str(tmp_path / "logs")
     plex_rename.PLANS.clear()
     plex_rename.JOBS.clear()
     fake_plex.SECTIONS.clear()

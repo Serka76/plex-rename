@@ -39,7 +39,7 @@ MAX_PLANS = 20
 
 JOBS = {}
 MAX_JOBS = 20
-LOG_DIR = "/app/logs"
+LOG_DIR = os.environ.get("LOG_DIR", "/app/logs")
 
 # Предел длины имени файла в ext4/btrfs — 255 байт, а кириллица занимает
 # по два байта на букву. Русское название вместе с оригинальным и
@@ -785,13 +785,33 @@ def debug():
                          debug_result=debug_result, debug_query=query)
 
 
-def run_rename_job(job_id, record):
-    os.makedirs(LOG_DIR, exist_ok=True)
-    log_path = os.path.join(LOG_DIR, f"rename_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
-    job = JOBS[job_id]
+def _open_log():
+    """Открывает файл журнала. Если каталог недоступен, возвращает
+    (None, причина): переименование из-за этого не отменяется — раньше
+    ошибка на os.makedirs убивала поток целиком, файлы оставались
+    нетронутыми, а в интерфейсе просто навсегда застывал прогресс-бар."""
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        path = os.path.join(LOG_DIR, f"rename_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+        return open(path, "a", encoding="utf-8"), None
+    except OSError as e:
+        return None, f"Журнал на диск не пишется ({e}); переименование всё равно выполняется."
 
-    with open(log_path, "a", encoding="utf-8") as logf:
-        logf.write(f"=== Запуск переименования: {datetime.now().isoformat()} ===\n")
+
+def run_rename_job(job_id, record):
+    job = JOBS[job_id]
+    logf, log_problem = _open_log()
+    if log_problem:
+        job["log"].append(log_problem)
+
+    def write(line):
+        job["log"].append(line)
+        if logf:
+            logf.write(line + "\n")
+            logf.flush()
+
+    try:
+        write(f"=== Запуск переименования: {datetime.now().isoformat()} ===")
         for item in record["plan"]:
             try:
                 # Повторная проверка перед самим переименованием: между
@@ -802,11 +822,9 @@ def run_rename_job(job_id, record):
                 else:
                     os.rename(item["old_path"], item["new_path"])
                     line = f"OK: {item['old']} -> {item['new']}"
-            except Exception as e:
+            except OSError as e:
                 line = f"ОШИБКА: {item['old']}: {e}"
-            logf.write(line + "\n")
-            logf.flush()
-            job["log"].append(line)
+            write(line)
             job["done"] += 1
             time.sleep(0.01)
 
@@ -815,15 +833,19 @@ def run_rename_job(job_id, record):
         try:
             plex = PlexServer(record["plex_url"], record["plex_token"])
             plex.library.section(record["library_name"]).update()
-            line = "Запущено обновление библиотеки в Plex."
+            write("Запущено обновление библиотеки в Plex.")
         except Exception as e:
-            line = f"Обновление библиотеки в Plex не запустилось: {e}"
-        logf.write(line + "\n")
-        job["log"].append(line)
+            write(f"Обновление библиотеки в Plex не запустилось: {e}")
 
-        logf.write(f"=== Завершено: {datetime.now().isoformat()} ===\n")
-
-    job["running"] = False
+        write(f"=== Завершено: {datetime.now().isoformat()} ===")
+    except Exception as e:
+        # Что бы ни случилось, задача обязана завершиться: иначе
+        # прогресс-бар в интерфейсе крутится бесконечно.
+        job["log"].append(f"Задача прервана: {e}")
+    finally:
+        if logf:
+            logf.close()
+        job["running"] = False
 
 
 @app.route("/apply", methods=["POST"])

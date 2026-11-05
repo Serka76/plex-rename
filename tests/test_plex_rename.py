@@ -7,10 +7,19 @@
 закрепить неверный ID в имени файла навсегда.
 """
 import os
+import time
 
 from fake_plex import FakeMovie
 
 TPL = "{title_full} ({year}) - {resolution} [{video_codec}][{audio_codec} {audio_channels}]{edition} {{{ext_ref}}}"
+
+
+def _дождаться(задача, предел=10.0):
+    """Переименование идёт в отдельном потоке — ждём его завершения."""
+    крайний_срок = time.monotonic() + предел
+    while задача["running"] and time.monotonic() < крайний_срок:
+        time.sleep(0.02)
+    return задача
 
 
 # --- имя файла -------------------------------------------------------
@@ -194,17 +203,35 @@ def test_полный_цикл_превью_и_применения(client, app_
     assert номер
 
     client.post("/apply", data={"plan_id": номер})
-    задача = next(iter(app_module.JOBS.values()))
-    for _ in range(100):
-        if not задача["running"]:
-            break
-        import time
-        time.sleep(0.05)
+    _дождаться(next(iter(app_module.JOBS.values())))
 
     assert not os.path.exists(старый)
     новые = [f for f in os.listdir(str(tmp_path)) if f.endswith(".mkv")]
     assert новые == ["Побег из Шоушенка (The Shawshank Redemption) (1994) - 1080 [HEVC][DTS 5.1] {tmdb-278}.mkv"]
     assert секция.updated, "библиотека Plex не обновлена после переименования"
+
+
+def test_недоступный_журнал_не_отменяет_переименование(client, app_module, library, mkfile, tmp_path):
+    """Раньше ошибка на создании каталога журнала убивала поток целиком:
+    файлы оставались нетронутыми, а прогресс-бар застывал навсегда."""
+    # Каталог внутри обычного файла создать нельзя никакими правами —
+    # это надёжнее, чем несуществующий путь, который root просто создаст.
+    преграда = tmp_path / "это_файл_а_не_каталог"
+    преграда.write_text("x", encoding="utf-8")
+    app_module.LOG_DIR = str(преграда / "logs")
+    старый = mkfile("мусор.mkv")
+    library([FakeMovie("Фильм", 2000, [старый], ["tmdb://1"])])
+
+    тело = client.post("/preview", data={"plex_url": "u", "plex_token": "t",
+                                         "library_name": "Кино", "template": TPL}).data.decode()
+    номер = тело.split('name="plan_id" value="')[1].split('"')[0]
+    client.post("/apply", data={"plan_id": номер})
+
+    задача = next(iter(app_module.JOBS.values()))
+    _дождаться(задача)
+    assert not задача["running"], "задача не завершилась"
+    assert not os.path.exists(старый), "файл не переименован"
+    assert any("Журнал на диск не пишется" in l for l in задача["log"])
 
 
 def test_один_план_применяется_один_раз(client, app_module, library, mkfile):
