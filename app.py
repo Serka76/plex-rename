@@ -24,16 +24,28 @@ except ImportError:
 
 app = Flask(__name__)
 
-VERSION = "1.8.0"
+VERSION = "1.9.0"
 STARTED_AT = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-LAST_PLAN = []
-LAST_CONFLICTS = []
-LAST_UNMATCHED = []
-LAST_ALREADY_OK = 0
+# v1.9.0. Раньше план лежал в одной переменной на весь процесс. Открыв
+# превью «Мультфильмов» в одной вкладке и «Фильмов» в другой, по кнопке
+# «Применить» в первой вкладке можно было переименовать вторую
+# библиотеку. Теперь у каждого превью свой идентификатор. Он же
+# защищает /apply: без него маршрут ничего не делает, а подобрать его со
+# стороннего сайта нельзя — то есть чужая страница больше не способна
+# запустить переименование вслепую.
+PLANS = {}
+MAX_PLANS = 20
 
 JOBS = {}
+MAX_JOBS = 20
 LOG_DIR = "/app/logs"
+
+# Предел длины имени файла в ext4/btrfs — 255 байт, а кириллица занимает
+# по два байта на букву. Русское название вместе с оригинальным и
+# кодеками этот предел перебирает, и os.rename падает по каждому такому
+# файлу.
+MAX_NAME_BYTES = 255
 
 DEFAULT_TEMPLATE = "{title_full} ({year}) - {resolution} [{video_codec}][{audio_codec} {audio_channels}]{edition} {{{ext_ref}}}"
 
@@ -198,6 +210,11 @@ PAGE = """
     Без TMDB
     {% if unmatched %}<span class="badge warn">{{ unmatched|length }}</span>{% endif %}
   </div>
+  <div class="navitem" data-tab="ambiguous">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 2l9 5v10l-9 5-9-5V7z"/><path d="M12 8v4M12 16h.01"/></svg>
+    Спорный ID
+    {% if ambiguous %}<span class="badge danger">{{ ambiguous|length }}</span>{% endif %}
+  </div>
   <div class="navitem" data-tab="log">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 17l6-6-6-6M12 19h8"/></svg>
     Журнал
@@ -216,20 +233,22 @@ PAGE = """
     <div class="stat"><div class="num">{{ already_ok }}</div><div class="lbl">уже в порядке</div></div>
     <div class="stat danger"><div class="num">{{ conflicts|length if conflicts is not none else 0 }}</div><div class="lbl">конфликтов</div></div>
     <div class="stat warn"><div class="num">{{ unmatched|length if unmatched is not none else 0 }}</div><div class="lbl">без tmdb id</div></div>
+    <div class="stat danger"><div class="num">{{ ambiguous|length if ambiguous is not none else 0 }}</div><div class="lbl">спорный id</div></div>
   </div>
 
   <section class="panel" data-panel="settings">
     <h1>Настройка подключения</h1>
     <p class="sub">Укажите адрес вашего Plex-сервера, токен доступа и имя библиотеки. Ничего не отправляется никуда, кроме вашего собственного Plex.</p>
 
-    {% if message %}<div class="msg {{ 'msg-ok' if status=='ok' else 'msg-err' }}">{{ message | safe }}</div>{% endif %}
+    {% if message %}<div class="msg {{ 'msg-ok' if status=='ok' else 'msg-err' }}">{{ message }}</div>{% endif %}
 
     <form method="post" action="/preview">
       <label>Адрес Plex (Plex URL)</label>
       <input type="text" name="plex_url" value="{{ plex_url }}" placeholder="http://192.168.2.2:32400">
 
       <label>Plex Token</label>
-      <input type="text" name="plex_token" value="{{ plex_token }}" placeholder="ваш X-Plex-Token">
+      <input type="password" name="plex_token" value="{{ plex_token }}" placeholder="ваш X-Plex-Token">
+      <p class="hint">Токен остаётся на вашем сервере. С версии 1.9.0 он не дублируется в скрытые поля на других вкладках — форма «Применить» передаёт только номер плана.</p>
 
       <label>Имя библиотеки в Plex</label>
       <input type="text" name="library_name" value="{{ library_name }}" placeholder="BestFilms">
@@ -248,10 +267,7 @@ PAGE = """
 
     {% if plan %}
     <form method="post" action="/apply">
-      <input type="hidden" name="plex_url" value="{{ plex_url }}">
-      <input type="hidden" name="plex_token" value="{{ plex_token }}">
-      <input type="hidden" name="library_name" value="{{ library_name }}">
-      <input type="hidden" name="template" value="{{ template }}">
+      <input type="hidden" name="plan_id" value="{{ plan_id }}">
       <button type="submit" class="btn-danger" onclick="return confirm('Точно переименовать {{ plan|length }} файлов на диске? Это действие нельзя отменить массово.');">
         Применить переименование ({{ plan|length }})
       </button>
@@ -277,9 +293,13 @@ PAGE = """
     <p class="sub">Эти файлы получили бы одинаковое новое имя — переименование для них пропущено, чтобы не потерять данные.</p>
     {% if conflicts %}
     <table>
-      <tr><th>Новое имя (совпало)</th><th>Файлы-источники</th></tr>
+      <tr><th>Новое имя</th><th>Причина</th><th>Файлы-источники</th></tr>
       {% for c in conflicts %}
-      <tr><td class="filename">{{ c.new }}</td><td class="filename">{{ c.olds | join('<br>') | safe }}</td></tr>
+      <tr>
+        <td class="filename">{{ c.new }}</td>
+        <td>{{ c.reason }}</td>
+        <td class="filename">{% for o in c.olds %}{{ o }}{% if not loop.last %}<br>{% endif %}{% endfor %}</td>
+      </tr>
       {% endfor %}
     </table>
     {% else %}
@@ -292,10 +312,7 @@ PAGE = """
     <p class="sub">Plex не сопоставил эти фильмы с TMDB — переименование для них пропущено. Поправьте сопоставление в самом Plex и запустите превью заново.</p>
 
     <form method="post" action="/debug" style="margin-bottom:24px; padding:16px; background:var(--surface); border:1px solid var(--line); border-radius:8px; max-width:640px;">
-      <input type="hidden" name="plex_url" value="{{ plex_url }}">
-      <input type="hidden" name="plex_token" value="{{ plex_token }}">
-      <input type="hidden" name="library_name" value="{{ library_name }}">
-      <input type="hidden" name="template" value="{{ template }}">
+      <input type="hidden" name="plan_id" value="{{ plan_id }}">
       <label style="margin-top:0;">Диагностика: посмотреть сырые данные Plex для фильма</label>
       <input type="text" name="debug_query" value="{{ debug_query }}" placeholder="например: Апокалипсис сегодня">
       <button type="submit" class="btn-primary" style="margin-top:10px;">Показать сырые данные</button>
@@ -317,10 +334,26 @@ PAGE = """
     {% endif %}
   </section>
 
+  <section class="panel" data-panel="ambiguous">
+    <h1>Спорный ID</h1>
+    <p class="sub">У этих фильмов в карточке Plex больше одного внешнего ID. Plex не стирает прежний ID при пересопоставлении — после Fix Match старый остаётся рядом с новым. Взять первый попавшийся нельзя: он может указывать на другой фильм, а записанный в имя файла ID Plex потом использует для принудительного сопоставления, и ошибка закрепится. Поправьте сопоставление в Plex и запустите превью заново.</p>
+    {% if ambiguous %}
+    <table>
+      <tr><th>Файл</th><th>Название в Plex</th><th>Найденные ID</th></tr>
+      {% for a in ambiguous %}
+      <tr><td class="filename">{{ a.file }}</td><td>{{ a.title }}</td><td class="filename">{{ a.ids }}</td></tr>
+      {% endfor %}
+    </table>
+    {% else %}
+      <div class="empty">Спорных ID нет.</div>
+    {% endif %}
+  </section>
+
   <section class="panel" data-panel="log">
     <h1>Журнал переименования</h1>
     <p class="sub">Полная история выполненных переименований также сохраняется в файл на диске.</p>
     {% if job_id %}
+    <div class="msg msg-ok" style="max-width:640px;">Файлы переименованы мимо Radarr и Sonarr — у них остались прежние пути, и фильмы будут числиться отсутствующими. После завершения запустите в них пересканирование библиотеки. Саму библиотеку Plex приложение обновит само.</div>
     <div id="progress-bar-bg"><div id="progress-bar"></div></div>
     <div id="progress-text">Запуск…</div>
     <div id="progress-log"></div>
@@ -391,48 +424,110 @@ PAGE = """
 LATIN_CYRILLIC_RE = re.compile(r"^[A-Za-zА-Яа-яЁё0-9\s\-:,.'!?&()«»№]+$")
 
 
+def store_plan(record: dict) -> str:
+    """Кладёт результат превью и возвращает его идентификатор."""
+    plan_id = str(uuid.uuid4())
+    PLANS[plan_id] = record
+    while len(PLANS) > MAX_PLANS:
+        PLANS.pop(next(iter(PLANS)), None)
+    return plan_id
+
+
+def _truncate_to_bytes(text: str, limit: int) -> str:
+    data = text.encode("utf-8")
+    if len(data) <= limit:
+        return text
+    return data[:limit].decode("utf-8", "ignore").rstrip()
+
+
+def fit_name(base: str, ext: str) -> str:
+    """Укладывает имя в 255 байт, сохраняя хвост вида {tmdb-12345}.
+
+    Обрезать просто с конца нельзя: там лежит ID, по которому Plex
+    принудительно сопоставляет файл с карточкой. Поэтому хвост в фигурных
+    скобках отрезается, укорачивается начало, затем хвост возвращается.
+    """
+    limit = MAX_NAME_BYTES - len(ext.encode("utf-8"))
+    if len(base.encode("utf-8")) <= limit:
+        return base
+    tail = ""
+    m = re.search(r"\s*\{[^{}]+\}\s*$", base)
+    if m:
+        tail = m.group(0).strip()
+        base = base[:m.start()]
+    head_limit = limit - len(tail.encode("utf-8")) - 1
+    if head_limit < 1:
+        return _truncate_to_bytes(base + tail, limit)
+    head = _truncate_to_bytes(base, head_limit).rstrip(" .-")
+    return (head + " " + tail).strip() if tail else head
+
+
 def safe_filename(name: str) -> str:
     name = re.sub(r'[\\/:*?"<>|]', '', name)
     name = re.sub(r'\s+', ' ', name).strip()
     return name
 
 
+def _collect_ids(guid_list, prefix):
+    """Все ID одного вида из карточки, без повторов и в исходном порядке."""
+    found = []
+    for guid in guid_list:
+        gid = getattr(guid, "id", "") or ""
+        if gid.startswith(prefix):
+            value = gid[len(prefix):]
+            if value and value not in found:
+                found.append(value)
+    return found
+
+
 def get_external_ref(movie):
     """
-    Возвращает строку вида "tmdb-12345", "imdb-tt0078788" или "kp-354" —
-    то, что реально есть в Plex для этого фильма. Порядок предпочтения:
+    Возвращает пару (ref, ambiguous).
+
+    ref — строка вида "tmdb-12345", "imdb-tt0078788" или "kp-354": то,
+    что реально есть в Plex для этого фильма. Порядок предпочтения:
     TMDB -> IMDb -> Кинопоиск (некоторые библиотеки сопоставлены через
     сторонний агент Кинопоиска, у него нет перекрёстных ID на TMDB/IMDb).
-    Возвращает None только если фильм в Plex вообще не опознан.
+
+    ambiguous — список ID, когда их в карточке несколько.
+
+    v1.9.0. Plex не удаляет прежние внешние ID при пересопоставлении: ни
+    Fix Match, ни Refresh, ни отвязка с повторной привязкой не стирают
+    старый tmdb:// — он остаётся в карточке рядом с новым. Прежний код
+    брал первый попавшийся и мог зашить в имя файла ID чужого фильма.
+    Ошибка при этом закрепляется навсегда: Plex потом читает {tmdb-ID}
+    из имени файла и принудительно сопоставляет карточку по нему.
+    Поэтому при нескольких ID файл не переименовывается, а уходит в
+    отдельный список — пусть человек решит, какой ID верный.
     """
     def _search(guid_list, legacy_guid):
-        for guid in guid_list:
-            if guid.id.startswith("tmdb://"):
-                return "tmdb-" + guid.id.replace("tmdb://", "")
-        for guid in guid_list:
-            if guid.id.startswith("imdb://"):
-                return "imdb-" + guid.id.replace("imdb://", "")
+        tmdb = _collect_ids(guid_list, "tmdb://")
+        if tmdb:
+            return ("tmdb-" + tmdb[0], ["tmdb-" + i for i in tmdb] if len(tmdb) > 1 else None)
+        imdb = _collect_ids(guid_list, "imdb://")
+        if imdb:
+            return ("imdb-" + imdb[0], ["imdb-" + i for i in imdb] if len(imdb) > 1 else None)
         m = re.search(r"themoviedb://(\d+)", legacy_guid)
         if m:
-            return "tmdb-" + m.group(1)
+            return ("tmdb-" + m.group(1), None)
         m = re.search(r"imdb://(tt\d+)", legacy_guid)
         if m:
-            return "imdb-" + m.group(1)
+            return ("imdb-" + m.group(1), None)
         m = re.search(r"(?:kinopoisk2?|poiskkino)://(?:movie/)?(\d+)", legacy_guid)
         if m:
-            return "kp-" + m.group(1)
-        return None
+            return ("kp-" + m.group(1), None)
+        return (None, None)
 
     guids = getattr(movie, "guids", []) or []
     legacy = getattr(movie, "guid", "") or ""
-    ref = _search(guids, legacy)
+    ref, ambiguous = _search(guids, legacy)
     if ref:
-        return ref
+        return ref, ambiguous
 
     try:
         movie.reload()
     except Exception:
-        return None
+        return None, None
 
     guids = getattr(movie, "guids", []) or []
     legacy = getattr(movie, "guid", "") or ""
@@ -527,17 +622,28 @@ def compute_plan(plex_url, plex_token, library_name, template):
 
     raw_items = []
     unmatched = []
+    ambiguous = []
     already_ok = 0
 
     for movie in movies:
         if not movie.media or not movie.media[0].parts:
             continue
 
-        ext_ref = get_external_ref(movie)
+        ext_ref, ambiguous_ids = get_external_ref(movie)
         if not ext_ref:
             for part in movie.media[0].parts:
                 if part.file:
                     unmatched.append({"file": os.path.basename(part.file), "title": f"{movie.title} ({movie.year})"})
+            continue
+
+        if ambiguous_ids:
+            # В карточке несколько внешних ID — какой из них настоящий,
+            # знает только человек. Подробности в get_external_ref.
+            for part in movie.media[0].parts:
+                if part.file:
+                    ambiguous.append({"file": os.path.basename(part.file),
+                                      "title": f"{movie.title} ({movie.year})",
+                                      "ids": ", ".join(ambiguous_ids)})
             continue
 
         parts = movie.media[0].parts
@@ -549,6 +655,7 @@ def compute_plan(plex_url, plex_token, library_name, template):
             folder = os.path.dirname(old_path)
             ext = os.path.splitext(old_path)[1]
             new_base = build_new_name(movie, template, ext_ref, part_num=part_num, part_total=part_total)
+            new_base = fit_name(new_base, ext)
             new_path = os.path.join(folder, new_base + ext)
             if old_path == new_path:
                 already_ok += 1
@@ -560,40 +667,101 @@ def compute_plan(plex_url, plex_token, library_name, template):
     for item in raw_items:
         by_new_path.setdefault(item["new_path"], []).append(item)
 
+    planned_sources = {item["old_path"] for item in raw_items}
+
     plan = []
     conflicts = []
     for new_path, items in by_new_path.items():
         if len(items) > 1:
-            conflicts.append({"new": os.path.basename(new_path), "olds": [i["old"] for i in items]})
-        else:
-            plan.append(items[0])
+            conflicts.append({"new": os.path.basename(new_path),
+                              "reason": "несколько файлов дают одно имя",
+                              "olds": [i["old"] for i in items]})
+            continue
+        # v1.9.0. os.rename на Linux молча затирает файл, который уже
+        # лежит по целевому пути. Проверка выше ловит только столкновения
+        # внутри плана: файл, которого в плане нет — ручная копия,
+        # остаток старого релиза, файл без карточки в Plex — прежде
+        # исчезал без следа и без строки в журнале.
+        if os.path.exists(new_path):
+            reason = ("целевое имя занято файлом, который тоже переименовывается"
+                      if new_path in planned_sources
+                      else "целевое имя уже занято другим файлом")
+            conflicts.append({"new": os.path.basename(new_path),
+                              "reason": reason,
+                              "olds": [items[0]["old"]]})
+            continue
+        plan.append(items[0])
 
-    return plan, conflicts, unmatched, already_ok
+    return plan, conflicts, unmatched, ambiguous, already_ok
 
 
 def render(plex_url="", plex_token="", library_name="BestFilms", template=DEFAULT_TEMPLATE,
-           plan=None, conflicts=None, unmatched=None, already_ok=0,
+           plan=None, conflicts=None, unmatched=None, ambiguous=None, already_ok=0,
            message=None, status="ok", job_id=None, active_tab="settings",
-           debug_result=None, debug_query=""):
+           debug_result=None, debug_query="", plan_id=""):
     return render_template_string(
         PAGE, plex_url=plex_url, plex_token=plex_token, library_name=library_name,
-        template=template, plan=plan, conflicts=conflicts, unmatched=unmatched, already_ok=already_ok,
+        template=template, plan=plan, conflicts=conflicts, unmatched=unmatched,
+        ambiguous=ambiguous, already_ok=already_ok,
         message=message, status=status, job_id=job_id, active_tab=active_tab, log_dir=LOG_DIR,
         version=VERSION, started_at=STARTED_AT, debug_result=debug_result, debug_query=debug_query,
+        plan_id=plan_id,
     )
+
+
+def render_record(record, plan_id, **over):
+    """Страница по сохранённому результату превью."""
+    args = dict(
+        plex_url=record["plex_url"], plex_token=record["plex_token"],
+        library_name=record["library_name"], template=record["template"],
+        plan=record["plan"], conflicts=record["conflicts"], unmatched=record["unmatched"],
+        ambiguous=record["ambiguous"], already_ok=record["already_ok"], plan_id=plan_id,
+    )
+    args.update(over)
+    return render(**args)
+
+
+@app.route("/", methods=["GET"])
+def index():
+    return render()
+
+
+@app.route("/preview", methods=["POST"])
+def preview():
+    plex_url = request.form.get("plex_url", "")
+    plex_token = request.form.get("plex_token", "")
+    library_name = request.form.get("library_name", "")
+    template = request.form.get("template", DEFAULT_TEMPLATE)
+
+    try:
+        plan, conflicts, unmatched, ambiguous, already_ok = compute_plan(
+            plex_url, plex_token, library_name, template)
+    except Exception as e:
+        return render(plex_url, plex_token, library_name, template,
+                      None, [], [], [], 0, f"Ошибка: {e}", "err", None, "settings")
+
+    record = {"plex_url": plex_url, "plex_token": plex_token, "library_name": library_name,
+              "template": template, "plan": plan, "conflicts": conflicts,
+              "unmatched": unmatched, "ambiguous": ambiguous, "already_ok": already_ok}
+    plan_id = store_plan(record)
+    return render_record(
+        record, plan_id, status="ok", active_tab="preview",
+        message="Готово. Ничего на диске ещё не изменено — проверьте вкладки «Превью», "
+                "«Конфликты», «Без TMDB» и «Спорный ID».")
 
 
 @app.route("/debug", methods=["POST"])
 def debug():
-    plex_url = request.form.get("plex_url", "")
-    plex_token = request.form.get("plex_token", "")
-    library_name = request.form.get("library_name", "")
-    query = request.form.get("debug_query", "")
+    plan_id = request.form.get("plan_id", "")
+    record = PLANS.get(plan_id)
+    if not record:
+        return render(message="Результат превью устарел — запустите превью заново.",
+                      status="err", active_tab="settings")
 
-    debug_result = None
+    query = request.form.get("debug_query", "")
     try:
-        plex = PlexServer(plex_url, plex_token)
-        library = plex.library.section(library_name)
+        plex = PlexServer(record["plex_url"], record["plex_token"])
+        library = plex.library.section(record["library_name"])
         results = library.search(title=query)
         if not results:
             debug_result = f"Ничего не нашлось по запросу «{query}»."
@@ -613,55 +781,27 @@ def debug():
     except Exception as e:
         debug_result = f"Ошибка: {e}"
 
-    template = request.form.get("template", DEFAULT_TEMPLATE)
-    library_name_val = library_name
-
-    return render(plex_url, plex_token, library_name_val, template,
-                  LAST_PLAN if LAST_PLAN else None, LAST_CONFLICTS, LAST_UNMATCHED,
-                  LAST_ALREADY_OK, None, "ok", None, "unmatched", debug_result=debug_result, debug_query=query)
+    return render_record(record, plan_id, active_tab="unmatched",
+                         debug_result=debug_result, debug_query=query)
 
 
-@app.route("/", methods=["GET"])
-def index():
-    return render()
-
-
-@app.route("/preview", methods=["POST"])
-def preview():
-    global LAST_PLAN, LAST_CONFLICTS, LAST_UNMATCHED, LAST_ALREADY_OK
-    plex_url = request.form.get("plex_url", "")
-    plex_token = request.form.get("plex_token", "")
-    library_name = request.form.get("library_name", "")
-    template = request.form.get("template", DEFAULT_TEMPLATE)
-
-    try:
-        plan, conflicts, unmatched, already_ok = compute_plan(plex_url, plex_token, library_name, template)
-        LAST_PLAN, LAST_CONFLICTS, LAST_UNMATCHED, LAST_ALREADY_OK = plan, conflicts, unmatched, already_ok
-        message = "Готово. Ничего на диске ещё не изменено — проверьте вкладки «Превью», «Конфликты» и «Без TMDB»."
-        status = "ok"
-        active_tab = "preview"
-    except Exception as e:
-        plan, conflicts, unmatched, already_ok = None, [], [], 0
-        LAST_PLAN, LAST_CONFLICTS, LAST_UNMATCHED, LAST_ALREADY_OK = [], [], [], 0
-        message = f"Ошибка: {e}"
-        status = "err"
-        active_tab = "settings"
-
-    return render(plex_url, plex_token, library_name, template, plan, conflicts, unmatched,
-                  already_ok, message, status, None, active_tab)
-
-
-def run_rename_job(job_id, plan):
+def run_rename_job(job_id, record):
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(LOG_DIR, f"rename_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
     job = JOBS[job_id]
 
     with open(log_path, "a", encoding="utf-8") as logf:
         logf.write(f"=== Запуск переименования: {datetime.now().isoformat()} ===\n")
-        for item in plan:
+        for item in record["plan"]:
             try:
-                os.rename(item["old_path"], item["new_path"])
-                line = f"OK: {item['old']} -> {item['new']}"
+                # Повторная проверка перед самим переименованием: между
+                # превью и применением файл по целевому пути мог
+                # появиться, а os.rename затирает его молча.
+                if os.path.exists(item["new_path"]):
+                    line = f"ПРОПУСК: {item['old']}: целевое имя уже занято — {item['new']}"
+                else:
+                    os.rename(item["old_path"], item["new_path"])
+                    line = f"OK: {item['old']} -> {item['new']}"
             except Exception as e:
                 line = f"ОШИБКА: {item['old']}: {e}"
             logf.write(line + "\n")
@@ -669,6 +809,18 @@ def run_rename_job(job_id, plan):
             job["log"].append(line)
             job["done"] += 1
             time.sleep(0.01)
+
+        # Пока Plex не пересканирует библиотеку, он держит прежние пути и
+        # фильмы остаются недоступными для проигрывания.
+        try:
+            plex = PlexServer(record["plex_url"], record["plex_token"])
+            plex.library.section(record["library_name"]).update()
+            line = "Запущено обновление библиотеки в Plex."
+        except Exception as e:
+            line = f"Обновление библиотеки в Plex не запустилось: {e}"
+        logf.write(line + "\n")
+        job["log"].append(line)
+
         logf.write(f"=== Завершено: {datetime.now().isoformat()} ===\n")
 
     job["running"] = False
@@ -676,20 +828,26 @@ def run_rename_job(job_id, plan):
 
 @app.route("/apply", methods=["POST"])
 def apply():
-    plan = LAST_PLAN
-    job_id = str(uuid.uuid4())
-    JOBS[job_id] = {"total": len(plan), "done": 0, "running": True, "log": []}
+    plan_id = request.form.get("plan_id", "")
+    record = PLANS.get(plan_id)
+    # Без действующего номера плана маршрут не делает ничего. Номер
+    # выдаётся только странице превью и подобрать его со стороннего сайта
+    # нельзя — значит, чужая страница не запустит переименование вслепую.
+    if not record:
+        return render(message="Результат превью устарел или уже применён — запустите превью заново.",
+                      status="err", active_tab="settings")
+    PLANS.pop(plan_id, None)   # один план применяется один раз
 
-    thread = threading.Thread(target=run_rename_job, args=(job_id, plan), daemon=True)
+    job_id = str(uuid.uuid4())
+    JOBS[job_id] = {"total": len(record["plan"]), "done": 0, "running": True, "log": []}
+    for stale in [k for k, v in list(JOBS.items())[:-MAX_JOBS] if not v.get("running")]:
+        JOBS.pop(stale, None)
+
+    thread = threading.Thread(target=run_rename_job, args=(job_id, record), daemon=True)
     thread.start()
 
-    plex_url = request.form.get("plex_url", "")
-    plex_token = request.form.get("plex_token", "")
-    library_name = request.form.get("library_name", "")
-    template = request.form.get("template", DEFAULT_TEMPLATE)
-
-    return render(plex_url, plex_token, library_name, template, None, LAST_CONFLICTS, LAST_UNMATCHED,
-                  LAST_ALREADY_OK, f"Запущено переименование {len(plan)} файлов.", "ok", job_id, "log")
+    return render_record(record, "", plan=None, job_id=job_id, active_tab="log", status="ok",
+                         message=f"Запущено переименование {len(record['plan'])} файлов.")
 
 
 @app.route("/progress/<job_id>")

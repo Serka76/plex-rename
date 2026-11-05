@@ -21,8 +21,6 @@
 #   раскомментируйте блок "ports" ниже, а в адресе Plex внутри самого
 #   приложения укажите IP хоста, а не localhost.
 
-version: "3.8"
-
 services:
   plex-rename-app:
     image: python:3.11-slim
@@ -35,9 +33,18 @@ services:
 
     volumes:
       - ./app.py:/app/app.py
+      # Журнал переименований. Без этой строки он останется внутри
+      # контейнера и пропадёт при его пересоздании.
       - ./logs:/app/logs
-      # ЗАМЕНИТЕ на путь к вашей библиотеке фильмов:
+      # ЗАМЕНИТЕ на путь к вашей библиотеке фильмов. Каталог нужен для
+      # КАЖДОЙ библиотеки, которую собираетесь переименовывать: файлы
+      # меняются напрямую на диске, и если каталог не смонтирован,
+      # превью окажется пустым без всякого объяснения.
       - /path/to/your/movies:/path/to/your/movies
 
-    command: sh -c "pip install flask plexapi --break-system-packages -q && python3 app.py"
+    # Версии закреплены по мажорному номеру: выход flask 4 или plexapi 5
+    # иначе сломает приложение в ближайший же перезапуск контейнера.
+    command: >
+      sh -c "pip install -q --break-system-packages 'flask>=3,<4' 'plexapi>=4.15,<5'
+      && python3 app.py"
     restart: unless-stopped
