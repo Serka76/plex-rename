@@ -1,10 +1,26 @@
-name: Lint
+name: Проверки
+
 on: [push, pull_request]
+
 jobs:
   lint:
-      runs-on: ubuntu-latest
-      steps:
-        - {uses: actions/checkout@v4}
-        - {uses: actions/setup-python@v5, with: {python-version: "3.12"}}
-        - {run: "pip install ruff"}
-        - {run: "ruff check . --select E9,F"}
+    name: Разбор кода
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install ruff
+      - run: ruff check . --select E9,F
+
+  tests:
+    name: Тесты
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      # plexapi не нужен: тесты подставляют заглушку вместо PlexServer,
+      # поэтому ни сети, ни живого Plex для прогона не требуется.
+      - run: pip install pytest "flask>=3,<4"
+      - run: pytest tests -q
