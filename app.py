@@ -24,7 +24,7 @@ except ImportError:
 
 app = Flask(__name__)
 
-VERSION = "1.9.2"
+VERSION = "1.9.3"
 STARTED_AT = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 # v1.9.0. Раньше план лежал в одной переменной на весь процесс. Открыв
@@ -486,7 +486,35 @@ def _collect_ids(guid_list, prefix):
     return found
 
 
-def get_external_ref(movie):
+PRIMARY_TMDB_RE = re.compile(r"(?:themoviedb://|tmdb-)(\d+)")
+FILE_TMDB_RE = re.compile(r"\{tmdb-(\d+)\}")
+
+
+def _primary_tmdb(legacy_guid):
+    """TMDB-номер текущего сопоставления, если Plex его называет.
+
+    Основной guid — это то, чем карточка сопоставлена прямо сейчас. У
+    встроенного агента он выглядит как themoviedb://1234, у стороннего
+    провайдера — как ...poiskkino://movie/tmdb-1234, когда карточка
+    собрана запасным путём через TMDB. Важное отличие от списка guids:
+    сюда прежние номера не накапливаются, здесь всегда ровно один.
+    """
+    m = PRIMARY_TMDB_RE.search(legacy_guid or "")
+    return m.group(1) if m else None
+
+
+def _file_tmdb(current_file):
+    """TMDB-номер, уже зашитый в имя файла.
+
+    Его записал тот, кто раскладывал файл по полкам (обычно Radarr),
+    опознав саму раздачу. Это утверждение о файле, а не о карточке:
+    если оно расходится с карточкой, спорить действительно есть о чём.
+    """
+    m = FILE_TMDB_RE.search(current_file or "")
+    return m.group(1) if m else None
+
+
+def get_external_ref(movie, current_file=None):
     """
     Возвращает пару (ref, ambiguous).
 
@@ -506,7 +534,19 @@ def get_external_ref(movie):
     Поэтому при нескольких ID файл не переименовывается, а уходит в
     отдельный список — пусть человек решит, какой ID верный.
     """
-    def _search(guid_list, legacy_guid):
+    def _search(guid_list, legacy_guid, filename=None):
+        # v1.9.3. Сначала два надёжных источника, и только потом общий
+        # список guids, куда Plex складывает в том числе прежние номера.
+        из_guid = _primary_tmdb(legacy_guid)
+        из_файла = _file_tmdb(filename)
+        if из_guid and из_файла and из_guid != из_файла:
+            # Карточка говорит одно, имя файла другое — вот это и есть
+            # настоящий спор, его решает человек.
+            return (None, ["tmdb-" + из_guid, "tmdb-" + из_файла])
+        решение = из_guid or из_файла
+        if решение:
+            return ("tmdb-" + решение, None)
+
         tmdb = _collect_ids(guid_list, "tmdb://")
         if tmdb:
             return ("tmdb-" + tmdb[0], ["tmdb-" + i for i in tmdb] if len(tmdb) > 1 else None)
@@ -526,8 +566,8 @@ def get_external_ref(movie):
 
     guids = getattr(movie, "guids", []) or []
     legacy = getattr(movie, "guid", "") or ""
-    ref, ambiguous = _search(guids, legacy)
-    if ref:
+    ref, ambiguous = _search(guids, legacy, current_file)
+    if ref or ambiguous:
         return ref, ambiguous
 
     try:
@@ -537,7 +577,7 @@ def get_external_ref(movie):
 
     guids = getattr(movie, "guids", []) or []
     legacy = getattr(movie, "guid", "") or ""
-    return _search(guids, legacy)
+    return _search(guids, legacy, current_file)
 
 
 def build_title_full(title, original_title):
@@ -635,21 +675,26 @@ def compute_plan(plex_url, plex_token, library_name, template):
         if not movie.media or not movie.media[0].parts:
             continue
 
-        ext_ref, ambiguous_ids = get_external_ref(movie)
-        if not ext_ref:
-            for part in movie.media[0].parts:
-                if part.file:
-                    unmatched.append({"file": os.path.basename(part.file), "title": f"{movie.title} ({movie.year})"})
-            continue
+        # Имя первого файла участвует в определении номера: в нём может
+        # уже стоять {tmdb-...}, записанный при раскладке по полкам.
+        первый_файл = next((p.file for p in movie.media[0].parts if p.file), None)
+        ext_ref, ambiguous_ids = get_external_ref(movie, первый_файл)
 
+        # Спор проверяется раньше отсутствия номера: при расхождении
+        # карточки с именем файла номер намеренно не выдаётся, и такая
+        # карточка должна попасть в «Спорный ID», а не в «Без TMDB».
         if ambiguous_ids:
-            # В карточке несколько внешних ID — какой из них настоящий,
-            # знает только человек. Подробности в get_external_ref.
             for part in movie.media[0].parts:
                 if part.file:
                     ambiguous.append({"file": os.path.basename(part.file),
                                       "title": f"{movie.title} ({movie.year})",
                                       "ids": ", ".join(ambiguous_ids)})
+            continue
+
+        if not ext_ref:
+            for part in movie.media[0].parts:
+                if part.file:
+                    unmatched.append({"file": os.path.basename(part.file), "title": f"{movie.title} ({movie.year})"})
             continue
 
         parts = movie.media[0].parts

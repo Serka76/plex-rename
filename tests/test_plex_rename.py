@@ -79,6 +79,57 @@ def test_повтор_одного_id_не_считается_спорным(app
     assert спорные is None
 
 
+def test_основной_guid_важнее_накопившегося_списка(app_module):
+    """Plex не стирает прежние номера из guids, зато основной guid
+    всегда отражает текущее сопоставление — ему и верим."""
+    movie = FakeMovie("Ф", 2000, ["/f.mkv"], ["tmdb://37724", "tmdb://700"],
+                      legacy_guid="tv.plex.agents.custom.kinoplex.poiskkino://movie/tmdb-700")
+    ref, спорные = app_module.get_external_ref(movie)
+    assert ref == "tmdb-700"
+    assert спорные is None
+
+
+def test_номер_берётся_из_имени_файла(app_module):
+    """Когда карточка номера не называет, его подсказывает имя файла —
+    туда его записал тот, кто опознал саму раздачу."""
+    movie = FakeMovie("Ф", 2000, ["/f.mkv"], ["tmdb://111", "tmdb://222"],
+                      legacy_guid="poiskkino://movie/596489")
+    ref, спорные = app_module.get_external_ref(
+        movie, "Whiplash (2014) - 1080 [HEVC][AC3 5.1] {tmdb-244786}.mkv")
+    assert ref == "tmdb-244786"
+    assert спорные is None
+
+
+def test_карточка_и_имя_файла_противоречат(app_module):
+    """Вот это и есть настоящий спор: номер не выдаётся вовсе, файл
+    переименовывать нельзя, пока человек не разберётся."""
+    movie = FakeMovie("Ф", 2000, ["/f.mkv"], ["tmdb://176"],
+                      legacy_guid="poiskkino://movie/tmdb-176")
+    ref, спорные = app_module.get_external_ref(
+        movie, "Saw (2003) - 2160 [HEVC][AC3 5.1] {tmdb-246355}.mkv")
+    assert ref is None
+    assert спорные == ["tmdb-176", "tmdb-246355"]
+
+
+def test_совпадение_карточки_и_имени_не_спор(app_module):
+    movie = FakeMovie("Ф", 2000, ["/f.mkv"], ["tmdb://31165", "tmdb://466272"],
+                      legacy_guid="poiskkino://movie/tmdb-31165")
+    ref, спорные = app_module.get_external_ref(movie, "кино {tmdb-31165}.mkv")
+    assert ref == "tmdb-31165" and спорные is None
+
+
+def test_спорная_карточка_не_уходит_в_без_tmdb(app_module, library, mkfile):
+    """Проверка спора идёт раньше проверки «номера нет»: иначе такие
+    карточки попадали бы не в ту вкладку."""
+    f = mkfile("Saw (2003) {tmdb-246355}.mkv")
+    library([FakeMovie("Пила", 2004, [f], ["tmdb://176"],
+                       legacy_guid="poiskkino://movie/tmdb-176")])
+    план, _, без_id, спорные, _ = app_module.compute_plan("u", "t", "Кино", TPL)
+    assert план == []
+    assert без_id == []
+    assert len(спорные) == 1 and "tmdb-246355" in спорные[0]["ids"]
+
+
 def test_кинопоиск_из_старого_guid(app_module):
     movie = FakeMovie("Ф", 2000, ["/f.mkv"], [],
                       legacy_guid="tv.plex.agents.custom.kinoplex.poiskkino://movie/326")
