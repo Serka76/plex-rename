@@ -66,9 +66,10 @@ class FakeSection:
 
 
 class FakePlexServer:
-    def __init__(self, url, token):
+    def __init__(self, url, token, timeout=None, **kwargs):
         self.url = url
         self.token = token
+        self.timeout = timeout
         self.library = types.SimpleNamespace(section=lambda name: SECTIONS[name])
 
 

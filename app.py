@@ -24,7 +24,7 @@ except ImportError:
 
 app = Flask(__name__)
 
-VERSION = "1.9.1"
+VERSION = "1.9.2"
 STARTED_AT = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 # v1.9.0. Раньше план лежал в одной переменной на весь процесс. Открыв
@@ -40,6 +40,12 @@ MAX_PLANS = 20
 JOBS = {}
 MAX_JOBS = 20
 LOG_DIR = os.environ.get("LOG_DIR", "/app/logs")
+
+# Сколько ждать ответа от Plex. Умолчание plexapi — 30 секунд, и на
+# библиотеке в полторы тысячи фильмов этого не хватало: превью падало
+# с «Read timed out», не показав ни одной строки. Запас вчетверо
+# дешевле, чем необъяснимая ошибка на половине библиотеки.
+PLEX_TIMEOUT = int(os.environ.get("PLEX_TIMEOUT", "120"))
 
 # Предел длины имени файла в ext4/btrfs — 255 байт, а кириллица занимает
 # по два байта на букву. Русское название вместе с оригинальным и
@@ -616,7 +622,7 @@ def build_new_name(movie, template: str, ext_ref: str, part_num: int = None, par
 
 
 def compute_plan(plex_url, plex_token, library_name, template):
-    plex = PlexServer(plex_url, plex_token)
+    plex = PlexServer(plex_url, plex_token, timeout=PLEX_TIMEOUT)
     library = plex.library.section(library_name)
     movies = library.all()
 
@@ -760,7 +766,7 @@ def debug():
 
     query = request.form.get("debug_query", "")
     try:
-        plex = PlexServer(record["plex_url"], record["plex_token"])
+        plex = PlexServer(record["plex_url"], record["plex_token"], timeout=PLEX_TIMEOUT)
         library = plex.library.section(record["library_name"])
         results = library.search(title=query)
         if not results:
@@ -831,7 +837,7 @@ def run_rename_job(job_id, record):
         # Пока Plex не пересканирует библиотеку, он держит прежние пути и
         # фильмы остаются недоступными для проигрывания.
         try:
-            plex = PlexServer(record["plex_url"], record["plex_token"])
+            plex = PlexServer(record["plex_url"], record["plex_token"], timeout=PLEX_TIMEOUT)
             plex.library.section(record["library_name"]).update()
             write("Запущено обновление библиотеки в Plex.")
         except Exception as e:
